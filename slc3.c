@@ -1,5 +1,7 @@
 
 #include "slc3.h"
+#include <unistd.h>
+#include <termios.h>
 
 // you can define a simple memory module here for this program
 Register memory[SIZE_OF_MEM]; // 32 words of memory enough to store simple program
@@ -18,17 +20,61 @@ void setCC(short result, CPU_p cpu) {
 //Prints out the register values, the IR, PC, MAR, and MDR.
 void printCurrentState(CPU_p cpu, ALU_p alu, int mem_Offset, unsigned short start_address);
 
+//C equivalent of LC3's GETC
+char getch() {
+    char buf = 0;
+    struct termios old = {0};
+    if (tcgetattr(0, &old) < 0)
+        perror("tcsetattr()");
+    
+	old.c_lflag &= ~ICANON;
+    old.c_lflag &= ~ECHO;
+    old.c_cc[VMIN] = 1;
+    old.c_cc[VTIME] = 0;
+    
+	if (tcsetattr(0, TCSANOW, &old) < 0)
+        perror("tcsetattr ICANON");
+    
+	if (read(0, &buf, 1) < 0)
+            perror ("read()");
+    
+	old.c_lflag |= ICANON;
+    old.c_lflag |= ECHO;
+    
+	if (tcsetattr(0, TCSADRAIN, &old) < 0)
+        perror ("tcsetattr ~ICANON");
+    
+	return (buf);
+}
+
 //Function to handle TRAP routines.
-int trap(int trap_vector) {
+int trap(int trap_vector, CPU_p cpu) {
+    int index;
     switch(trap_vector) {
         case HALT:
             return HALT;
+        case GETC:
+            cpu->regFile[0] = getch();
+            break;
+        case OUT:
+            printf("%c", cpu->regFile[0]);
+            fflush(stdout);
+            break;
+        case PUTS:
+            index = cpu->regFile[0];
+            while (memory[index] != 0) {
+              printf("%c", memory[index]);
+              index++;
+            }
+            fflush(stdout);
+            break;
     }
+    return 0;
 }
 
 //Executes instructions on our simulated CPU.
 int completeOneInstructionCycle(CPU_p cpu, ALU_p alu) {
-    Register opcode, Rd, Rs1, Rs2, immed_offset, nzp, BEN, pcOffset9; // fields for the IR
+    Register opcode, Rd, Rs1, Rs2, immed_offset, nzp, BEN, pcOffset; // fields for the IR
     int state = FETCH;
     while (state != DONE) {
         switch (state) {
@@ -57,9 +103,33 @@ int completeOneInstructionCycle(CPU_p cpu, ALU_p alu) {
                 Rs1 = Rs1 >> 6;
                 Rs2 = cpu->IR & 0x0007;
                 BEN = cpu->CC & nzp; //current cc & instruction's nzp
-                pcOffset9 = 0x01FF & cpu->IR;
-                if (pcOffset9 & 0x0100) {
-                    pcOffset9 = pcOffset9 | 0xFE00;
+                switch (opcode) {
+                    case LEA: //pcOffset9
+                    case LD:
+                    case ST:
+                    case BR:
+                        pcOffset = 0x01FF & cpu->IR;
+                        if (pcOffset & 0x0100) { //checks if pcOffset is negative
+                            pcOffset = pcOffset | 0xFE00;
+                        }
+                        break;
+                    case STR: //pcOffset6
+                    case LDR:
+                        pcOffset = 0x003F & cpu->IR; //0011 1111 & IR
+                        if (pcOffset & 0x0020) {
+                            pcOffset = pcOffset | 0xFFC0;
+                        }
+                        break;
+                    case JSR: 
+                        if (0x0800 & cpu->IR) { //if doing JSR, get pcOffset11
+                            pcOffset = 0x07FF & cpu->IR; //0111 1111 1111 & IR
+                            if (pcOffset & 0x0400) {
+                                pcOffset = pcOffset | 0xF800;
+                            }
+                        }
+                        break;
+                    default: 
+                        break;
                 }
 
                 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -78,11 +148,14 @@ int completeOneInstructionCycle(CPU_p cpu, ALU_p alu) {
                         break;
                     case LD:
                     case ST:
-                        cpu->MAR = cpu->PC + pcOffset9;
+                        cpu->MAR = cpu->PC + pcOffset;
                         break;
+                    case STR:
+                    case LDR:
+                        cpu->MAR = cpu->regFile[Rs1] + pcOffset;
                     case BR:
                         if (BEN) {
-                            cpu->PC = cpu->PC + pcOffset9;
+                            cpu->PC = cpu->PC + pcOffset;
                         }
                         break;
                     default:
@@ -116,10 +189,12 @@ int completeOneInstructionCycle(CPU_p cpu, ALU_p alu) {
                         alu->A = cpu->regFile[Rs1];
                         break;
                     case LD:
+                    case LDR:
                         cpu->MDR = memory[cpu->MAR];
                         break;
                     case ST:
-                        cpu->MDR = Rd;
+                    case STR:
+                        cpu->MDR = cpu->regFile[Rd];
                         break;
                     default:
                         break;
@@ -148,10 +223,19 @@ int completeOneInstructionCycle(CPU_p cpu, ALU_p alu) {
                         setCC(alu->R, cpu);
                         break;
                     case TRAP:
-                        return trap(cpu->MAR);
+                        if (trap(cpu->MAR, cpu) == HALT) //checks if program should halt
+                            return HALT;
                         break;
                     case JMP:
                         cpu->PC = cpu->regFile[Rs1];
+                        break;
+                    case JSR:
+                        cpu->regFile[7] = cpu->PC; //R7 = PC
+                        if (0x0800 & cpu->IR) { //if JSRR
+                            cpu->PC += pcOffset; //PC = PC + PCoffset11
+                        } else { //else doing JSR
+                            cpu->PC = cpu->regFile[Rs1]; //PC = BaseReg
+                        }
                         break;
                     default:
                         break;
@@ -177,11 +261,17 @@ int completeOneInstructionCycle(CPU_p cpu, ALU_p alu) {
                         cpu->regFile[Rd] = alu->R;
                         break;
                     case LD:
+                    case LDR:
                         cpu->regFile[Rd] = cpu->MDR;
                         setCC(cpu->regFile[Rd], cpu);
                         break;
                     case ST:
+                    case STR:
                         memory[cpu->MAR] = cpu->MDR;
+                        break;
+                    case LEA:
+                        cpu->regFile[Rd] = cpu->PC + pcOffset;
+                        setCC(cpu->regFile[Rd], cpu);
                         break;
                     default:
                         break;
@@ -255,14 +345,13 @@ int main(int argc, char * argv[]) {
     unsigned short start_address = DEFAULT_ADDRESS;
     int loadedProgram = 0;
     int programHalted = 0;
-    int haltCode = 37; //0x25 = 37
     cpu_pointer->regFile[0] = 0x1E; //R0 = 30
     cpu_pointer->regFile[7] = 0x5; //R7 = 5
 
   while (1){
     printf("Welcome to the LC-3 Simulator Simulator\n");
 	  printCurrentState(cpu_pointer, alu_pointer, offset, start_address);
-	  printf("Select: 1) Load, 3) Step, 5) Display Mem, 9) Exit\n> ");
+	  printf("Select: 1) Load, 3) Step, 4) Run, 5) Display Mem, 9) Exit\n> ");
     scanf("%d", &choice);
     switch(choice){
       case LOAD:
@@ -270,7 +359,6 @@ int main(int argc, char * argv[]) {
         scanf("%s", input);
         FILE *fp = fopen(input, "r");
         if(fp == NULL){
-          loadedProgram = 0;
           printf("Error: File not found. Press <ENTER> to continue");
           getEnterInput(error);
         } else {
@@ -301,11 +389,28 @@ int main(int argc, char * argv[]) {
       case STEP:
         if (loadedProgram == 1) {
           int response = completeOneInstructionCycle(cpu_pointer, alu_pointer);
-          if (response == haltCode) {
+          if (response == HALT) {
             loadedProgram = 0;
             programHalted = 1;
             printf("\n======Program halted.======\n");
           }
+        } else if (programHalted == 1){
+          printf("Your program has halted. Please load another program. \nPress <ENTER> to continue");
+          getEnterInput(error);
+        } else {
+          printf("Please load a program first. Press <ENTER> to continue");
+          getEnterInput(error);
+        }
+        break;
+      case RUN:
+        if (loadedProgram == 1) {
+          int response = completeOneInstructionCycle(cpu_pointer, alu_pointer);
+          while (response != HALT) {
+            response = completeOneInstructionCycle(cpu_pointer, alu_pointer);
+          }
+          loadedProgram = 0;
+          programHalted = 1;
+          printf("\n======Program halted.======\n");
         } else if (programHalted == 1){
           printf("Your program has halted. Please load another program. \nPress <ENTER> to continue");
           getEnterInput(error);

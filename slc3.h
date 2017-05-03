@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #define DEBUG 0
-#define SIZE_OF_MEM 32
+#define SIZE_OF_MEM 2048
 #define DISPLAY_SIZE 16
 #define DEFAULT_ADDRESS 0x3000
 
@@ -25,6 +25,11 @@
 #define ST 3
 #define JMP 12
 #define BR 0
+#define JSR 4
+#define LEA 14
+#define RET 12
+#define STR 7
+#define LDR 6
 
 #define N 4 //100
 #define Z 2 //010
@@ -32,10 +37,14 @@
 
 #define LOAD 1
 #define STEP 3
+#define RUN 4
 #define DISPLAY_MEM 5
 #define EXIT 9
 
-#define HALT 25
+#define GETC 32 //0x20
+#define OUT 33 //0x21
+#define PUTS 34 //0x22
+#define HALT 37 //0x25
 
 typedef unsigned short Register;
 
